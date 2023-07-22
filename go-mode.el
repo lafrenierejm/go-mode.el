@@ -9,7 +9,7 @@
 ;; Author: The go-mode Authors
 ;; Version: 1.6.0
 ;; Keywords: languages go
-;; Package-Requires: ((emacs "26.1"))
+;; Package-Requires: ((emacs "26.1") (reformatter "0.6"))
 ;; URL: https://github.com/dominikh/go-mode.el
 ;;
 ;; This file is not part of GNU Emacs.
@@ -21,6 +21,7 @@
 (require 'etags)
 (require 'ffap)
 (require 'find-file)
+(require 'reformatter)
 (require 'ring)
 (require 'url)
 (require 'xref)
@@ -1754,7 +1755,7 @@ The following extra functions are defined:
 If you want to automatically run `gofmt' before saving a file,
 add the following hook to your Emacs configuration:
 
-\(add-hook 'before-save-hook #'gofmt-before-save)
+\(add-hook 'go-mode-hook #'gofmt-on-save-mode)
 
 If you want to use `godef-jump' instead of etags (or similar),
 consider binding godef-jump to `M-.', which is the default key
@@ -1898,112 +1899,16 @@ with goflymake (see URL `https://github.com/dougm/goflymake'), gocode
               (error "Invalid rcs patch or internal error in go--apply-rcs-patch")))))))
     (move-to-column column)))
 
-(defun gofmt--is-goimports-p ()
-  (string-equal (file-name-base gofmt-command) "goimports"))
-
-(defun gofmt ()
-  "Format the current buffer according to the formatting tool.
-
-The tool used can be set via ‘gofmt-command’ (default: gofmt) and additional
-arguments can be set as a list via ‘gofmt-args’."
-  (interactive)
-  (let ((tmpfile (make-nearby-temp-file "gofmt" nil ".go"))
-        (patchbuf (get-buffer-create "*Gofmt patch*"))
-        (errbuf (if gofmt-show-errors (get-buffer-create "*Gofmt Errors*")))
-        (coding-system-for-read 'utf-8)
-        (coding-system-for-write 'utf-8)
-        our-gofmt-args)
-
-    (unwind-protect
-        (save-restriction
-          (widen)
-          (if errbuf
-              (with-current-buffer errbuf
-                (setq buffer-read-only nil)
-                (erase-buffer)))
-          (with-current-buffer patchbuf
-            (erase-buffer))
-
-          (write-region nil nil tmpfile)
-
-          (when (and (gofmt--is-goimports-p) buffer-file-name)
-            (setq our-gofmt-args
-                  (append our-gofmt-args
-                          ;; srcdir, despite its name, supports
-                          ;; accepting a full path, and some features
-                          ;; of goimports rely on knowing the full
-                          ;; name.
-                          (list "-srcdir" (file-local-name
-                                           (file-truename buffer-file-name))))))
-          (setq our-gofmt-args
-                (append our-gofmt-args gofmt-args
-                        (list "-w" (file-local-name tmpfile))))
-          (message "Calling gofmt: %s %s" gofmt-command our-gofmt-args)
-          ;; We're using errbuf for the mixed stdout and stderr output. This
-          ;; is not an issue because gofmt -w does not produce any stdout
-          ;; output in case of success.
-          (if (zerop (apply #'process-file gofmt-command nil errbuf nil our-gofmt-args))
-              (progn
-                ;; There is no remote variant of ‘call-process-region’, but we
-                ;; can invoke diff locally, and the results should be the same.
-                (if (zerop (let ((local-copy (file-local-copy tmpfile)))
-                             (unwind-protect
-                                 (call-process-region
-                                  (point-min) (point-max) "diff" nil patchbuf
-                                  nil "-n" "-" (or local-copy tmpfile))
-                               (when local-copy (delete-file local-copy)))))
-                    (message "Buffer is already gofmted")
-                  (go--apply-rcs-patch patchbuf)
-                  (message "Applied gofmt"))
-                (if errbuf (gofmt--kill-error-buffer errbuf)))
-            (message "Could not apply gofmt")
-            (if errbuf (gofmt--process-errors (buffer-file-name) tmpfile errbuf))))
-
-      (kill-buffer patchbuf)
-      (delete-file tmpfile))))
-
-
-(defun gofmt--process-errors (filename tmpfile errbuf)
-  (with-current-buffer errbuf
-    (if (eq gofmt-show-errors 'echo)
-        (progn
-          (message "%s" (buffer-string))
-          (gofmt--kill-error-buffer errbuf))
-      ;; Convert the gofmt stderr to something understood by the compilation mode.
-      (goto-char (point-min))
-      (if (save-excursion
-            (save-match-data
-              (search-forward "flag provided but not defined: -srcdir" nil t)))
-          (insert "Your version of goimports is too old and doesn't support vendoring. Please update goimports!\n\n"))
-      (insert "gofmt errors:\n")
-      (let ((truefile
-             (if (gofmt--is-goimports-p)
-                 (concat (file-name-directory filename) (file-name-nondirectory tmpfile))
-               tmpfile)))
-        (while (search-forward-regexp
-                (concat "^\\(" (regexp-quote (file-local-name truefile))
-                        "\\):")
-                nil t)
-          (replace-match (file-name-nondirectory filename) t t nil 1)))
-      (compilation-mode)
-      (display-buffer errbuf))))
-
-(defun gofmt--kill-error-buffer (errbuf)
-  (let ((win (get-buffer-window errbuf)))
-    (if win
-        (quit-window t win)
-      (kill-buffer errbuf))))
-
-;;;###autoload
-(defun gofmt-before-save ()
-  "Add this to .emacs to run gofmt on the current buffer when saving:
-\(add-hook 'before-save-hook 'gofmt-before-save).
-
-Note that this will cause ‘go-mode’ to get loaded the first time
-you save any file, kind of defeating the point of autoloading."
-
-  (interactive)
-  (when (eq major-mode 'go-mode) (gofmt)))
+;;;###autoload (autoload 'gofmt-buffer "go-mode")
+;;;###autoload (autoload 'gofmt-region "go-mode")
+;;;###autoload (autoload 'gofmt-on-save-mode "go-mode")
+(reformatter-define gofmt
+  :program gofmt-command
+  :args '("-s")
+  :stdin t
+  :stdout t
+  ;; :input-file (reformatter-temp-file-in-current-directory)
+  :group 'go)
 
 (defun godoc--read-query ()
   "Read a godoc query from the minibuffer."
